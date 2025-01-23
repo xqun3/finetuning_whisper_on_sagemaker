@@ -48,7 +48,7 @@
 <span style="color:red"> 注意点1：DataCollatorSpeechSeq2SeqWithPadding 类中
 `labels_batch = self.processor.tokenizer.pad(label_features, max_length=128, padding=PaddingStrategy.MAX_LENGTH, return_tensors="pt")` 中的 `max_length` 是训练样本中，transcription 的最大token数，这个值会影响到每个样本 label padding 的长度从而影响训练效率，需要根据训练数据集的实际情况进行设置。</span>
 
-<span style="color:red"> 注意点2：启动脚本中的 `--max_steps="1024" 指定训练步数，注意此参数在流式读取训练数据进行训练的情况下必须设置`</span>
+<span style="color:red"> 注意点2：启动脚本中的 `--max_steps="1024"` 指定训练步数，注意此参数在流式读取训练数据进行训练的情况下必须设置`</span>
 
 
 `sagemaker_torchrun_iter.sh` 中的主要训练参数：
