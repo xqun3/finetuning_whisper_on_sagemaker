@@ -39,33 +39,6 @@ require_version("datasets>=1.18.0", "To fix: pip install -r requirements.txt")
 
 logger = logging.getLogger(__name__)
 
-def load_dataset(data_dir, json_file):
-    json_path = os.path.join(data_dir, json_file)
-    with open(json_path, 'r') as f:
-        transcriptions = json.load(f)
-    features = Features({
-        "path": Value("string"),
-        "audio": Audio(sampling_rate=16_000),
-        "sentence": Value("string"),
-    })
-
-    def generate_data():
-        for id_, (path, sentence) in enumerate(tqdm(transcriptions.items(), desc='Processing audio files')):
-            audio_path = os.path.join(data_dir, path)
-            
-            if not os.path.exists(audio_path):
-                print(f"Warning: Audio file not found: {audio_path}")
-                continue
-
-            yield {
-                "path": audio_path,
-                "audio": {"path": audio_path, "bytes": open(audio_path, "rb").read()},
-                "sentence": sentence,
-            }
-
-    dataset = Dataset.from_generator(generate_data, features=features)
-    return dataset, len(transcriptions)
-
 
 @dataclass
 class ModelArguments:
@@ -228,6 +201,34 @@ class DataTrainingArguments:
         default="transcribe",
         metadata={"help": "Task, either `transcribe` for speech recognition or `translate` for speech translation."},
     )
+    
+
+def load_dataset(data_dir, json_file):
+    json_path = os.path.join(data_dir, json_file)
+    with open(json_path, 'r') as f:
+        transcriptions = json.load(f)
+    features = Features({
+        "path": Value("string"),
+        "audio": Audio(sampling_rate=16_000),
+        "sentence": Value("string"),
+    })
+
+    def generate_data():
+        for id_, (path, sentence) in enumerate(tqdm(transcriptions.items(), desc='Processing audio files')):
+            audio_path = os.path.join(data_dir, path)
+            
+            if not os.path.exists(audio_path):
+                print(f"Warning: Audio file not found: {audio_path}")
+                continue
+
+            yield {
+                "path": audio_path,
+                "audio": {"path": audio_path, "bytes": open(audio_path, "rb").read()},
+                "sentence": sentence,
+            }
+
+    dataset = Dataset.from_generator(generate_data, features=features)
+    return dataset
 
 
 @dataclass
@@ -352,23 +353,28 @@ def main():
     raw_datasets = IterableDatasetDict()
     
 
+    max_train_samples = None
+    max_eval_samples = None 
     if training_args.do_train:
 
         with training_args.main_process_first(desc="dataset load pre-processing"):
-            raw_datasets, data_length = load_dataset(data_args.dataset_dir, data_args.json_file)
+            raw_datasets = load_dataset(data_args.dataset_dir, data_args.json_file)
             raw_datasets = raw_datasets.train_test_split(test_size=0.1)
             print(raw_datasets)
             train_datasets_length = raw_datasets["train"].num_rows 
             eval_datasets_length = raw_datasets["test"].num_rows 
             if data_args.max_train_samples is not None:
-                raw_datasets["train"] = raw_datasets["train"].select(range(data_args.max_train_samples))
+                max_train_samples = min(data_args.max_train_samples, train_datasets_length)
+                raw_datasets["train"] = raw_datasets["train"].select(range(max_train_samples))
 
             if data_args.max_eval_samples is not None:
-                raw_datasets["eval"] = raw_datasets["test"].select(range(data_args.max_eval_samples))
+                max_eval_samples = min(data_args.max_eval_samples, eval_datasets_length)
+                raw_datasets["eval"] = raw_datasets["test"].select(range(max_eval_samples))
+            print(raw_datasets)
             raw_datasets['train'] = raw_datasets["train"].to_iterable_dataset()
             raw_datasets['eval'] = raw_datasets["eval"].to_iterable_dataset()
 
-       
+
     # if training_args.do_eval:
     #     raw_datasets["eval"] = load_dataset(data_args.dataset_dir, data_args.json_file)
 
@@ -562,7 +568,7 @@ def main():
 
         metrics = train_result.metrics
         max_train_samples = (
-            data_args.max_train_samples
+            max_train_samples
             if data_args.max_train_samples is not None
             else train_datasets_length
         )
@@ -581,7 +587,7 @@ def main():
             num_beams=training_args.generation_num_beams,
         )
         max_eval_samples = (
-            data_args.max_eval_samples if data_args.max_eval_samples is not None else eval_datasets_length
+            max_eval_samples if data_args.max_eval_samples is not None else eval_datasets_length
         )
         metrics["eval_samples"] = min(max_eval_samples, eval_datasets_length)
 

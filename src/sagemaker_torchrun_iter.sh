@@ -23,6 +23,7 @@ torchrun $DISTRIBUTED_ARGS \
     --output_dir="/tmp/finetuned_model" \
     --per_device_train_batch_size="16" \
     --per_device_eval_batch_size="16" \
+    --gradient_accumulation_steps="4" \
     --logging_steps="25" \
     --max_eval_samples "128" \
     --learning_rate="1e-5" \

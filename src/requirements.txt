@@ -11,4 +11,4 @@ torchvision==0.19.0+cu124
 wandb==0.19.2
 transformers==4.46.1
 jiwer
-deepspeed
+deepspeed==0.15.4

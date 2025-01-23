@@ -8,6 +8,7 @@
 - 在 SageMaker 上支持多机多卡训练
 - 集成 Weights & Biases 进行实验追踪
 - 使用 PyTorch DDP/DeepSpeed 进行分布式训练
+- 提供了流式读取训练数据的实现，避免在有大量数据集训练的情况下出现内存不够的情况
 
 ## 代码库结构
 
@@ -44,6 +45,12 @@
 
 ## 训练配置
 
+<span style="color:red"> 注意点1：DataCollatorSpeechSeq2SeqWithPadding 类中
+`labels_batch = self.processor.tokenizer.pad(label_features, max_length=128, padding=PaddingStrategy.MAX_LENGTH, return_tensors="pt")` 中的 `max_length` 是训练样本中，transcription 的最大token数，这个值会影响到每个样本 label padding 的长度从而影响训练效率，需要根据训练数据集的实际情况进行设置。</span>
+
+<span style="color:red"> 注意点2：启动脚本中的 `--max_steps="1024" 指定训练步数，注意此参数在流式读取训练数据进行训练的情况下必须设置`</span>
+
+
 `sagemaker_torchrun_iter.sh` 中的主要训练参数：
 
 ```bash
@@ -52,7 +59,7 @@
 --json_file="gt_transcript.json"                # 转录文件
 --language="zh"                                 # 目标语言
 --task="transcribe"                            # 任务类型
---max_steps="1024"                             # 训练步数
+--max_steps="1024"                             # 训练步数，注意此参数在流式读取训练数据的情况下一定需要设置
 --per_device_train_batch_size="16"             # 每个GPU的批次大小
 --learning_rate="1e-5"                         # 学习率
 --warmup_steps="500"                           # 学习率预热步数
@@ -85,7 +92,7 @@ estimator.fit(
 
 ## 功能特性
 
-- **分布式训练**：使用 PyTorch DDP/DeepSpeed 支持多节点分布式训练
+- **分布式训练**：使用 PyTorch DDP/DeepSpeed Zero 支持多节点分布式训练
 - **混合精度训练**：FP16 训练以提高训练速度和内存效率
 - **梯度检查点**：用于优化大模型训练的内存使用
 - **Wandb 集成**：训练进度追踪和可视化
