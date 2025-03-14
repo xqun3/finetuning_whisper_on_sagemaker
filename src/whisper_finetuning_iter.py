@@ -15,6 +15,7 @@ import torch
 from datasets import IterableDatasetDict
 
 import transformers
+from peft import LoraConfig, PeftModel, get_peft_model, prepare_model_for_kbit_training
 from transformers import (
     AutoConfig,
     AutoFeatureExtractor,
@@ -105,6 +106,28 @@ class ModelArguments:
         metadata={
             "help": "Whether to apply *SpecAugment* data augmentation to the input features. This is currently only relevant for Wav2Vec2, HuBERT, WavLM and Whisper models."
         },
+    )
+    
+    # LoRA parameters
+    use_lora: bool = field(
+        default=False,
+        metadata={"help": "Whether to use LoRA for parameter-efficient fine-tuning."},
+    )
+    lora_r: int = field(
+        default=8,
+        metadata={"help": "LoRA attention dimension."},
+    )
+    lora_alpha: int = field(
+        default=16,
+        metadata={"help": "LoRA alpha parameter."},
+    )
+    lora_dropout: float = field(
+        default=0.05,
+        metadata={"help": "LoRA dropout value."},
+    )
+    lora_target_modules: List[str] = field(
+        default_factory=lambda: ["q_proj", "v_proj"],
+        metadata={"help": "List of module names or regex patterns to apply LoRA to."},
     )
 
 
@@ -441,6 +464,21 @@ def main():
     if model_args.freeze_encoder:
         model.freeze_encoder()
         model.model.encoder.gradient_checkpointing = False
+        
+    # Apply LoRA if specified
+    if model_args.use_lora:
+        logger.info("Applying LoRA adapters...")
+        # Define LoRA config
+        lora_config = LoraConfig(
+            r=model_args.lora_r,
+            lora_alpha=model_args.lora_alpha,
+            target_modules=model_args.lora_target_modules,
+            lora_dropout=model_args.lora_dropout,
+            bias="none",
+        )
+        # Apply LoRA
+        model = get_peft_model(model, lora_config)
+        model.print_trainable_parameters()  # Print trainable vs total parameters
 
     if hasattr(model.generation_config, "is_multilingual") and model.generation_config.is_multilingual:
         # We only need to set the language and task ids in a multilingual setting

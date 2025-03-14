@@ -13,7 +13,6 @@ torchrun $DISTRIBUTED_ARGS \
     --deepspeed ds_z0_config.json \
     --model_name_or_path="openai/whisper-large-v3" \
     --dataset_dir="/opt/ml/input/data/train" \
-    --dataset_config_name="zh-CN" \
     --json_file="gt_transcript.json" \
     --language="zh" \
     --task="transcribe" \
@@ -37,7 +36,10 @@ torchrun $DISTRIBUTED_ARGS \
     --preprocessing_num_workers="16" \
     --text_column_name="sentence" \
     --freeze_feature_encoder="False" \
-    --gradient_checkpointing \
+    --use_lora True \
+    --lora_r 16 \
+    --lora_alpha 32 \
+    --lora_dropout 0.05 \
     --fp16 \
     --overwrite_output_dir \
     --do_train \
