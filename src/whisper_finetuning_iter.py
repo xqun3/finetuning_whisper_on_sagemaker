@@ -5,6 +5,7 @@ import os
 import sys
 import json
 import tqdm
+import random
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Union
 from datasets import Dataset, Features, Value, Audio
@@ -12,15 +13,15 @@ from tqdm import tqdm
 import datasets
 import evaluate
 import torch
-from datasets import IterableDatasetDict
+from datasets import IterableDatasetDict, DatasetDict
 
 import transformers
 from peft import LoraConfig, PeftModel, get_peft_model, prepare_model_for_kbit_training
 from transformers import (
     AutoConfig,
     AutoFeatureExtractor,
-    AutoModelForSpeechSeq2Seq,
-    AutoProcessor,
+    WhisperForConditionalGeneration,
+    WhisperProcessor,
     AutoTokenizer,
     HfArgumentParser,
     Seq2SeqTrainer,
@@ -91,7 +92,7 @@ class ModelArguments:
         },
     )
     freeze_feature_encoder: bool = field(
-        default=True, metadata={"help": "Whether to freeze the feature encoder layers of the model."}
+        default=False, metadata={"help": "Whether to freeze the feature encoder layers of the model."}
     )
     freeze_encoder: bool = field(
         default=False, metadata={"help": "Whether to freeze the entire encoder of the seq2seq model."}
@@ -184,31 +185,8 @@ class DataTrainingArguments:
         metadata={"help": "The name of the dataset column containing the text data. Defaults to 'text'"},
     )
 
-    preprocessing_only: bool = field(
-        default=False,
-        metadata={
-            "help": (
-                "Whether to only do data preprocessing and skip training. This is especially useful when data"
-                " preprocessing errors out in distributed training due to timeout. In this case, one should run the"
-                " preprocessing in a non-distributed setup with `preprocessing_only=True` so that the cached datasets"
-                " can consequently be loaded in distributed training"
-            )
-        },
-    )
-    train_split_name: str = field(
-        default="train",
-        metadata={
-            "help": "The name of the training data set split to use (via the datasets library). Defaults to 'train'"
-        },
-    )
-    eval_split_name: str = field(
-        default="test",
-        metadata={
-            "help": "The name of the training data set split to use (via the datasets library). Defaults to 'train'"
-        },
-    )
     do_lower_case: bool = field(
-        default=True,
+        default=False,
         metadata={"help": "Whether the target text should be lower cased."},
     )
     language: str = field(
@@ -227,9 +205,18 @@ class DataTrainingArguments:
     
 
 def load_dataset(data_dir, json_file):
-    json_path = os.path.join(data_dir, json_file)
-    with open(json_path, 'r') as f:
-        transcriptions = json.load(f)
+    file_path = os.path.join(data_dir, json_file)
+    if file_path.endswith(".json"):
+        with open(file_path, 'r') as f:
+            transcriptions = json.load(f)
+    elif file_path.endswith(".txt"):
+        with open(file_path, 'r') as f:
+            transcriptions = [[line.split('\t')[0], line.split('\t')[1].strip()] for line in f]
+            random.shuffle(transcriptions)
+            transcriptions = {line[0]: line[1] for line in transcriptions}
+    else:
+        raise ValueError(f"Unsupported file format: {file_path}")
+
     features = Features({
         "path": Value("string"),
         "audio": Audio(sampling_rate=16_000),
@@ -278,12 +265,20 @@ class DataCollatorSpeechSeq2SeqWithPadding:
         input_features = [{model_input_name: feature[model_input_name]} for feature in features]
         label_features = [{"input_ids": feature["labels"]} for feature in features]
 
+        # Process input features
         batch = self.processor.feature_extractor.pad(input_features, return_tensors="pt")
 
+        # Add encoder attention mask if needed
         if self.forward_attention_mask:
             batch["attention_mask"] = torch.LongTensor([feature["attention_mask"] for feature in features])
 
-        labels_batch = self.processor.tokenizer.pad(label_features, max_length=128, padding=PaddingStrategy.MAX_LENGTH, return_tensors="pt")
+        # Process label features
+        labels_batch = self.processor.tokenizer.pad(
+            label_features, 
+            max_length=128, 
+            padding=PaddingStrategy.MAX_LENGTH, 
+            return_tensors="pt"
+        )
 
         # replace padding with -100 to ignore loss correctly
         labels = labels_batch["input_ids"].masked_fill(labels_batch.attention_mask.ne(1), -100)
@@ -294,8 +289,12 @@ class DataCollatorSpeechSeq2SeqWithPadding:
             labels = labels[:, 1:]
 
         batch["labels"] = labels
+        
+        # Add decoder_attention_mask to fix the warning
+        batch["decoder_attention_mask"] = labels_batch["attention_mask"]
 
         return batch
+
 
 
 def safe_save_model_for_hf_trainer(trainer: transformers.Trainer, output_dir: str):
@@ -370,10 +369,10 @@ def main():
             )
 
     # Set seed before initializing model.
-    set_seed(training_args.seed)
+    # set_seed(training_args.seed)
 
     # 4. Load dataset
-    raw_datasets = IterableDatasetDict()
+    raw_datasets = DatasetDict()
     
 
     max_train_samples = None
@@ -386,16 +385,16 @@ def main():
             print(raw_datasets)
             train_datasets_length = raw_datasets["train"].num_rows 
             eval_datasets_length = raw_datasets["test"].num_rows 
+            raw_datasets["eval"] = raw_datasets["test"]
             if data_args.max_train_samples is not None:
                 max_train_samples = min(data_args.max_train_samples, train_datasets_length)
                 raw_datasets["train"] = raw_datasets["train"].select(range(max_train_samples))
 
             if data_args.max_eval_samples is not None:
                 max_eval_samples = min(data_args.max_eval_samples, eval_datasets_length)
-                raw_datasets["eval"] = raw_datasets["test"].select(range(max_eval_samples))
+                raw_datasets["eval"] = raw_datasets["eval"].select(range(max_eval_samples))
             print(raw_datasets)
             raw_datasets['train'] = raw_datasets["train"].to_iterable_dataset()
-            raw_datasets['eval'] = raw_datasets["eval"].to_iterable_dataset()
 
 
     # if training_args.do_eval:
@@ -446,7 +445,7 @@ def main():
         token=model_args.token,
         trust_remote_code=model_args.trust_remote_code,
     )
-    model = AutoModelForSpeechSeq2Seq.from_pretrained(
+    model = WhisperForConditionalGeneration.from_pretrained(
         model_args.model_name_or_path,
         config=config,
         cache_dir=model_args.cache_dir,
@@ -498,7 +497,7 @@ def main():
     # 6. Resample speech dataset if necessary
     dataset_sampling_rate = next(iter(raw_datasets.values())).features[data_args.audio_column_name].sampling_rate
     if dataset_sampling_rate != feature_extractor.sampling_rate:
-        print("Xiaoqun Dong:raw_datasets.cast_column !")
+        logger.info("sampling rate not match!")
         raw_datasets = raw_datasets.cast_column(
             data_args.audio_column_name, datasets.features.Audio(sampling_rate=feature_extractor.sampling_rate)
         )
@@ -515,7 +514,6 @@ def main():
         and getattr(config, "apply_spec_augment", False)
         and getattr(config, "mask_time_prob", 0) > 0
     )
-    print("forward_attention_mask: ", forward_attention_mask)
 
 
     def prepare_dataset(batch):
@@ -574,7 +572,7 @@ def main():
             tokenizer.save_pretrained(training_args.output_dir)
             config.save_pretrained(training_args.output_dir)
 
-    processor = AutoProcessor.from_pretrained(training_args.output_dir)
+    processor = WhisperProcessor.from_pretrained(training_args.output_dir)
 
     # 10. Define data collator
     data_collator = DataCollatorSpeechSeq2SeqWithPadding(

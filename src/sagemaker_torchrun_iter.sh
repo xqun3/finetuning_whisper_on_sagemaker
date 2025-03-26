@@ -11,23 +11,21 @@ DISTRIBUTED_ARGS="--nproc_per_node $SM_NUM_GPUS --nnodes $NODE_NUMBER --node_ran
 torchrun $DISTRIBUTED_ARGS \
     whisper_finetuning_iter.py \
     --deepspeed ds_z0_config.json \
-    --model_name_or_path="openai/whisper-large-v3" \
+    --model_name_or_path="openai/whisper-large-v3-turbo" \
     --dataset_dir="/opt/ml/input/data/train" \
     --json_file="gt_transcript.json" \
     --language="zh" \
     --task="transcribe" \
-    --train_split_name="train+validation" \
     --max_steps="1024" \
     --dataloader_drop_last True \
     --output_dir="/tmp/finetuned_model" \
-    --per_device_train_batch_size="16" \
+    --per_device_train_batch_size="8" \
     --per_device_eval_batch_size="16" \
     --gradient_accumulation_steps="4" \
     --logging_steps="25" \
     --max_eval_samples "128" \
     --learning_rate="1e-5" \
     --warmup_steps="500" \
-    --eval_split_name="eval" \
     --eval_strategy="steps" \
     --eval_steps="50" \
     --save_strategy="steps" \
@@ -37,8 +35,8 @@ torchrun $DISTRIBUTED_ARGS \
     --text_column_name="sentence" \
     --freeze_feature_encoder="False" \
     --use_lora True \
-    --lora_r 16 \
-    --lora_alpha 32 \
+    --lora_r 64 \
+    --lora_alpha 16 \
     --lora_dropout 0.05 \
     --fp16 \
     --overwrite_output_dir \
