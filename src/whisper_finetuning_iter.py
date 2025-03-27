@@ -13,7 +13,7 @@ from tqdm import tqdm
 import datasets
 import evaluate
 import torch
-from datasets import IterableDatasetDict, DatasetDict
+from datasets import IterableDatasetDict,IterableDataset, DatasetDict
 
 import transformers
 from peft import LoraConfig, PeftModel, get_peft_model, prepare_model_for_kbit_training
@@ -30,7 +30,7 @@ from transformers import (
 )
 from transformers.utils import PaddingStrategy
 from transformers.trainer_utils import get_last_checkpoint, is_main_process
-from transformers.utils import check_min_version, send_example_telemetry
+from transformers.utils import check_min_version
 from transformers.utils.versions import require_version
 
 
@@ -153,7 +153,10 @@ class DataTrainingArguments:
         default=None,
         metadata={"help": "Path to the JSON file containing ground truth transcripts"}
     )
-    
+    test_size: float = field(
+        default=0.1,
+        metadata={"help": "The proportion of the dataset to use as test/evaluation set"}
+    )
     preprocessing_num_workers: Optional[int] = field(
         default=None,
         metadata={"help": "The number of processes to use for the preprocessing."},
@@ -202,43 +205,70 @@ class DataTrainingArguments:
         default="transcribe",
         metadata={"help": "Task, either `transcribe` for speech recognition or `translate` for speech translation."},
     )
-    
 
-def load_dataset(data_dir, json_file):
-    file_path = os.path.join(data_dir, json_file)
+    
+def load_dataset(data_args):
+    features = Features({
+        "path": Value("string"),
+        "audio": Audio(sampling_rate=16_000),
+        "sentence": Value("string"),
+    })
+    file_path = os.path.join(data_args.dataset_dir, data_args.json_file)
+
+    # 加载转录文件
     if file_path.endswith(".json"):
         with open(file_path, 'r') as f:
             transcriptions = json.load(f)
     elif file_path.endswith(".txt"):
         with open(file_path, 'r') as f:
             transcriptions = [[line.split('\t')[0], line.split('\t')[1].strip()] for line in f]
-            random.shuffle(transcriptions)
             transcriptions = {line[0]: line[1] for line in transcriptions}
     else:
         raise ValueError(f"Unsupported file format: {file_path}")
 
-    features = Features({
-        "path": Value("string"),
-        "audio": Audio(sampling_rate=16_000),
-        "sentence": Value("string"),
-    })
+    # 将转录分割为训练集和测试集
+    items = list(transcriptions.items())
+    split_idx = int(len(items) * (1 - data_args.test_size))
 
-    def generate_data():
-        for id_, (path, sentence) in enumerate(tqdm(transcriptions.items(), desc='Processing audio files')):
-            audio_path = os.path.join(data_dir, path)
-            
+    # 定义数据生成函数
+    def generate_data(selected_transcriptions):
+        for path, sentence in selected_transcriptions.items():
+            audio_path = os.path.join(data_args.dataset_dir, path)
+
             if not os.path.exists(audio_path):
                 print(f"Warning: Audio file not found: {audio_path}")
                 continue
 
             yield {
                 "path": audio_path,
-                "audio": {"path": audio_path, "bytes": open(audio_path, "rb").read()},
+                "audio": {"path": audio_path},  # 只提供路径，不读取内容
                 "sentence": sentence,
             }
 
-    dataset = Dataset.from_generator(generate_data, features=features)
-    return dataset
+    raw_datasets = DatasetDict()
+
+    selected_items_train = items[:split_idx]
+
+    selected_transcriptions_train = dict(selected_items_train)
+    train_sample_length = len(selected_transcriptions_train)
+    gen_kwargs = {"selected_transcriptions": selected_transcriptions_train}
+
+    raw_datasets["train"] = IterableDataset.from_generator(generate_data, features=features, gen_kwargs=gen_kwargs)
+
+    # test set
+    selected_items_test = items[split_idx:]
+    selected_transcriptions_test = dict(selected_items_test)
+    all_examples = []
+    for example in generate_data(selected_transcriptions_test):
+        all_examples.append(example)
+
+    raw_datasets["eval"] = Dataset.from_dict({
+        "path": [ex["path"] for ex in all_examples],
+        "audio": [{"path": ex["audio"]["path"]} for ex in all_examples],
+        "sentence": [ex["sentence"] for ex in all_examples]
+    }, features=features)
+
+    return raw_datasets, train_sample_length
 
 
 @dataclass
@@ -289,12 +319,11 @@ class DataCollatorSpeechSeq2SeqWithPadding:
             labels = labels[:, 1:]
 
         batch["labels"] = labels
-        
+
         # Add decoder_attention_mask to fix the warning
         batch["decoder_attention_mask"] = labels_batch["attention_mask"]
 
         return batch
-
 
 
 def safe_save_model_for_hf_trainer(trainer: transformers.Trainer, output_dir: str):
@@ -308,22 +337,13 @@ def safe_save_model_for_hf_trainer(trainer: transformers.Trainer, output_dir: st
 
 
 def main():
-    # 1. Parse input arguments
-    # See all possible arguments in src/transformers/training_args.py
-    # or by passing the --help flag to this script.
-    # We now keep distinct sets of args, for a cleaner separation of concerns.
+
     parser = HfArgumentParser((ModelArguments, DataTrainingArguments, Seq2SeqTrainingArguments))
 
     if len(sys.argv) == 2 and sys.argv[1].endswith(".json"):
-        # If we pass only one argument to the script and it's the path to a json file,
-        # let's parse it to get our arguments.
         model_args, data_args, training_args = parser.parse_json_file(json_file=os.path.abspath(sys.argv[1]))
     else:
         model_args, data_args, training_args = parser.parse_args_into_dataclasses()
-
-    # Sending telemetry. Tracking the example usage helps us better allocate resources to maintain them. The
-    # information sent is the one passed as arguments along with your Python/PyTorch versions.
-    send_example_telemetry("run_speech_recognition_seq2seq", model_args, data_args)
 
     # 2. Setup logging
     logging.basicConfig(
@@ -372,33 +392,13 @@ def main():
     # set_seed(training_args.seed)
 
     # 4. Load dataset
-    raw_datasets = DatasetDict()
-    
-
+    raw_datasets = None
     max_train_samples = None
     max_eval_samples = None 
     if training_args.do_train:
-
         with training_args.main_process_first(desc="dataset load pre-processing"):
-            raw_datasets = load_dataset(data_args.dataset_dir, data_args.json_file)
-            raw_datasets = raw_datasets.train_test_split(test_size=0.1)
-            print(raw_datasets)
-            train_datasets_length = raw_datasets["train"].num_rows 
-            eval_datasets_length = raw_datasets["test"].num_rows 
-            raw_datasets["eval"] = raw_datasets["test"]
-            if data_args.max_train_samples is not None:
-                max_train_samples = min(data_args.max_train_samples, train_datasets_length)
-                raw_datasets["train"] = raw_datasets["train"].select(range(max_train_samples))
-
-            if data_args.max_eval_samples is not None:
-                max_eval_samples = min(data_args.max_eval_samples, eval_datasets_length)
-                raw_datasets["eval"] = raw_datasets["eval"].select(range(max_eval_samples))
-            print(raw_datasets)
-            raw_datasets['train'] = raw_datasets["train"].to_iterable_dataset()
-
-
-    # if training_args.do_eval:
-    #     raw_datasets["eval"] = load_dataset(data_args.dataset_dir, data_args.json_file)
+            raw_datasets, train_datasets_length = load_dataset(data_args)
+            eval_datasets_length = raw_datasets["eval"].num_rows
 
     if data_args.audio_column_name not in next(iter(raw_datasets.values())).column_names:
         raise ValueError(
@@ -415,7 +415,7 @@ def main():
         )
 
     # 5. Load pretrained model, tokenizer, and feature extractor
-    
+
     # Distributed training:
     # The .from_pretrained methods guarantee that only one local process can concurrently
     config = AutoConfig.from_pretrained(
@@ -463,7 +463,7 @@ def main():
     if model_args.freeze_encoder:
         model.freeze_encoder()
         model.model.encoder.gradient_checkpointing = False
-        
+
     # Apply LoRA if specified
     if model_args.use_lora:
         logger.info("Applying LoRA adapters...")
@@ -543,8 +543,6 @@ def main():
             remove_columns=raw_datasets['train'].column_names,
         )
 
-    print(raw_datasets)
-
 
     # 8. Load Metric
     metric = evaluate.load("wer", cache_dir=model_args.cache_dir)
@@ -567,6 +565,7 @@ def main():
     with training_args.main_process_first():
         # only the main process saves them
         if is_main_process(training_args.local_rank):
+            print(raw_datasets)
             # save feature extractor, tokenizer and config
             feature_extractor.save_pretrained(training_args.output_dir)
             tokenizer.save_pretrained(training_args.output_dir)
