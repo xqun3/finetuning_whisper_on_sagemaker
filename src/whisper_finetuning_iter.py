@@ -222,6 +222,7 @@ def load_dataset(data_args):
     elif file_path.endswith(".txt"):
         with open(file_path, 'r') as f:
             transcriptions = [[line.split('\t')[0], line.split('\t')[1].strip()] for line in f]
+            random.shuffle(transcriptions)
             transcriptions = {line[0]: line[1] for line in transcriptions}
     else:
         raise ValueError(f"Unsupported file format: {file_path}")
@@ -398,6 +399,9 @@ def main():
     if training_args.do_train:
         with training_args.main_process_first(desc="dataset load pre-processing"):
             raw_datasets, train_datasets_length = load_dataset(data_args)
+            if data_args.max_eval_samples is not None:
+                max_eval_samples = min(data_args.max_eval_samples, eval_datasets_length)
+                raw_datasets["eval"] = raw_datasets["eval"].select(range(max_eval_samples))
             eval_datasets_length = raw_datasets["eval"].num_rows
 
     if data_args.audio_column_name not in next(iter(raw_datasets.values())).column_names:
